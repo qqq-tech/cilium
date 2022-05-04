@@ -662,8 +662,6 @@ func (s *Service) UpdateBackendsState(backends []lb.Backend) error {
 	s.Lock()
 	defer s.Unlock()
 	for _, updatedB := range backends {
-		hash := updatedB.L3n4Addr.Hash()
-
 		be, exists := s.backendByHash[hash]
 		if !exists {
 			// Cilium service API and Kubernetes events are asynchronous, so it's
