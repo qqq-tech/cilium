@@ -18,6 +18,7 @@ package ipsec
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -27,12 +28,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
-	"github.com/cilium/cilium/pkg/datapath/linux/route"
-	"github.com/cilium/cilium/pkg/maps/encrypt"
-
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/nodediscovery"
+	"github.com/fsnotify/fsnotify"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
+
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+	"github.com/cilium/cilium/pkg/datapath/linux/route"
+	"github.com/cilium/cilium/pkg/fswatcher"
+	"github.com/cilium/cilium/pkg/maps/encrypt"
 )
 
 type IPSecDir string
@@ -475,6 +481,8 @@ func decodeIPSecKey(keyRaw string) (int, []byte, error) {
 // is to put a key per line as follows, (auth-algo auth-key enc-algo enc-key)
 // Returns the authentication overhead in bytes, the key ID, and an error.
 func LoadIPSecKeysFile(path string) (int, uint8, error) {
+	log.WithField(logfields.Path, path).Info("Loading IPsec keyfile")
+
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, 0, err
@@ -624,4 +632,41 @@ func DeleteIPsecEncryptRoute() {
 			}
 		}
 	}
+}
+
+func keyfileWatcher(ctx context.Context, watcher *fswatcher.Watcher, keyfilePath string, nodediscovery *nodediscovery.NodeDiscovery) {
+	for {
+		select {
+		case event := <-watcher.Events:
+			if event.Op&(fsnotify.Create|fsnotify.Write) == 0 {
+				continue
+			}
+
+			_, spi, err := LoadIPSecKeysFile(keyfilePath)
+			if err != nil {
+				log.WithError(err).Errorf("Failed to load IPsec keyfile")
+				continue
+			}
+
+			node.SetIPsecKeyIdentity(spi)
+			nodediscovery.UpdateLocalNode(true)
+
+		case err := <-watcher.Errors:
+			log.WithError(err).WithField(logfields.Path, keyfilePath).Warning("Error encountered while watching file with fsnotify")
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func StartKeyfileWatcher(ctx context.Context, keyfilePath string, nodediscovery *nodediscovery.NodeDiscovery) error {
+	watcher, err := fswatcher.New([]string{keyfilePath})
+	if err != nil {
+		return err
+	}
+
+	go keyfileWatcher(ctx, watcher, keyfilePath, nodediscovery)
+
+	return nil
 }
